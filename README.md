@@ -103,24 +103,4 @@ Also try `Write a poem`, `Help me`, and
 3. `app/main.py`: compares `confidence` against the threshold and executes the selected branch.
 4. `app/agents.py`: three small functions that perform the tasks.
 
-The TypeSafe Python SDK is only a compatible typed HTTP client here. Its `base_url` is explicitly
-local; the placeholder `local-openjev` satisfies SDK validation and is not a cloud credential.
-The application rejects non-loopback OpenJev URLs; the model server binds to `127.0.0.1`.
-The OpenAI package is an upstream helper dependency, not a call to the OpenAI API:
-the MLX launcher performs actual local inference and reads option probabilities from model logits.
-
-The POC pins the model revision and starts with a confidence threshold of 0.80.
-Typed decisions do not guarantee correct classification. Confidence differs from the winning
-option's probability; 0.80 is a demo policy, not a calibrated accuracy guarantee.
-Python's execution policy is deterministic for a given decision, but identical classification
-across hardware and runtime versions is not guaranteed.
-
-To keep the demo small, arithmetic accepts a complete expression with numbers,
-`+`, `-`, `*`, `/`, and parentheses; use `Calculate: ...` or the expression alone.
-It does not interpret word problems; it limits expression length and complexity, and magnitude to 1e12.
-The weekday agent accepts a single ISO date in `YYYY-MM-DD` format, without relative dates.
-All API messages and weekday results are returned in English.
-The arithmetic and weekday agents are local functions; they do not require another server.
-After setup, classification and translation stay local. Only translation generates free-form text.
-`scripts/start_openjev.sh` runs the official MLX helper with the published calibration settings.
 
