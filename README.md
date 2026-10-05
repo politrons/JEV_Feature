@@ -1,0 +1,187 @@
+# OpenJev Agent Router
+
+Minimal local proof of concept: FastAPI receives a request, OpenJev selects a route,
+and Python invokes its agent. No TypeSafe account or paid API is used.
+Start with `app/jev.py`: it contains the `Choice` question, the five options, and the single model call.
+
+```text
+POST /classify -> OpenJev (MLX, port 3000) -> decision + probabilities + confidence
+POST /ask     -> OpenJev -> threshold 0.80 -> agent -> result
+```
+
+| Route selected by OpenJev | Agent |
+| --- | --- |
+| TRANSLATE_ES_EN | Translation with a local Ollama model |
+| ARITHMETIC | Calculation using Python's AST, without eval |
+| WEEKDAY | Date handling with datetime.date |
+| OUT_OF_SCOPE | No agent |
+| NEEDS_CLARIFICATION | Requests more information, without invoking an agent |
+
+A decision below the threshold also prevents agent execution; the response preserves the original decision.
+If an agent receives invalid input, it returns `needs_clarification` even if OpenJev was confident.
+
+## Running
+
+Requires Python 3.12+, an Apple Silicon Mac, and sufficient memory for the 4-bit model.
+The published weights occupy approximately 15 GB; this workspace was prepared on a 48 GB Mac.
+FastAPI uses `.venv`; the model runtime is isolated in `.openjev-venv`.
+For a fresh installation, download the pinned official helpers and weights:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+bash scripts/setup_openjev.sh
+```
+
+The setup script verifies published model checksums. Downloads, runtimes, and vendor files
+are excluded from version control. `.env` is ready here; `.env.example` documents the settings.
+No API key is required. Start OpenJev in one terminal, then FastAPI in another:
+
+```bash
+bash scripts/start_openjev.sh
+```
+
+```bash
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Open [Swagger](http://127.0.0.1:8000/docs) to try the API.
+`GET /health` checks FastAPI liveness only, not model readiness.
+`GET http://127.0.0.1:3000/v1/version` reports the loaded model and readout configuration.
+Classification returns 503 if OpenJev is unavailable; no fallback agent is executed.
+
+Only translation requires Ollama to be running with the model configured in `.env`:
+
+```bash
+ollama serve
+```
+
+In another terminal, if that model has not been downloaded yet:
+
+```bash
+ollama pull llama3.1:8b
+```
+
+## Testing OpenJev Separately
+
+```bash
+curl -s http://127.0.0.1:8000/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Calculate: 12 * (3 + 2)"}'
+```
+
+The response includes `intent`, `confidence`, `probabilities`, `model`, and `latency_ms`.
+These are OpenJev's values, without a generated explanation or agent execution.
+
+## Testing The Orchestrator
+
+```bash
+curl -s http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Calculate: 12 * (3 + 2)"}'
+```
+
+```bash
+curl -s http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What day of the week was 2024-01-01?"}'
+```
+
+```bash
+curl -s http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Translate into English: Buenos dias, como estas?"}'
+```
+
+Also try `Write a poem`, `Help me`, and
+`Translate hola into English and calculate 2 + 2` to see cases that do not invoke an agent.
+
+## Reading The Code
+
+1. `app/models.py`: the five intents and the request and response models.
+2. `app/jev.py`: `state` is the request; `questions` contains a `Choice` with criteria.
+3. `app/main.py`: compares `confidence` against the threshold and executes the selected branch.
+4. `app/agents.py`: three small functions that perform the tasks.
+
+The TypeSafe Python SDK is only a compatible typed HTTP client here. Its `base_url` is explicitly
+local; the placeholder `local-openjev` satisfies SDK validation and is not a cloud credential.
+The application rejects non-loopback OpenJev URLs; the model server binds to `127.0.0.1`.
+The OpenAI package is an upstream helper dependency, not a call to the OpenAI API:
+the MLX launcher performs actual local inference and reads option probabilities from model logits.
+
+The POC pins the model revision and starts with a confidence threshold of 0.80.
+Typed decisions do not guarantee correct classification. Confidence differs from the winning
+option's probability; 0.80 is a demo policy, not a calibrated accuracy guarantee.
+Python's execution policy is deterministic for a given decision, but identical classification
+across hardware and runtime versions is not guaranteed.
+
+To keep the demo small, arithmetic accepts a complete expression with numbers,
+`+`, `-`, `*`, `/`, and parentheses; use `Calculate: ...` or the expression alone.
+It does not interpret word problems; it limits expression length and complexity, and magnitude to 1e12.
+The weekday agent accepts a single ISO date in `YYYY-MM-DD` format, without relative dates.
+All API messages and weekday results are returned in English.
+The arithmetic and weekday agents are local functions; they do not require another server.
+After setup, classification and translation stay local. Only translation generates free-form text.
+`scripts/start_openjev.sh` runs the official MLX helper with the published calibration settings.
+
+## Application Logs
+
+Application logs are written to the server's console in English at `INFO` level by default.
+Set `APP_LOG_LEVEL=DEBUG` in `.env` and restart the server for additional parsing details.
+
+Each request receives a unique ID, shown as `request_id` in every application log entry
+and returned in the `X-Request-ID` response header.
+Startup and shutdown entries use `request_id=-` because they are not associated with a request.
+
+The logs track request arrival, OpenJev classification and probabilities, the confidence threshold,
+agent selection, Ollama calls, successful completion, and errors.
+Low confidence, ambiguous input, unsupported requests, and invalid agent input each have an explicit reason.
+API keys, request bodies, translation output, and raw upstream error bodies are not logged.
+The upstream OpenJev server separately prints model loading and inference timing.
+
+To show the request ID alongside an API response:
+
+```bash
+curl -i http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Calculate: 12 * (3 + 2)"}'
+```
+
+## Verification
+
+```bash
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+.venv/bin/python -m pytest -q
+bash -n scripts/setup_openjev.sh scripts/start_openjev.sh
+```
+
+Offline tests use HTTP test doubles exclusively in `tests/`, together with the real official SDK;
+they validate the compatible request contract, routing, threshold, English results, tracing,
+errors, and agents, not model accuracy.
+With OpenJev running, evaluate seven requests using actual local inference:
+
+```bash
+.venv/bin/python -m pytest -m live -q
+```
+
+Live tests fail if the server is unavailable or classification differs from expectations.
+Once the project is a Git repository, you can enable pre-commit checks:
+
+```bash
+.venv/bin/pre-commit install
+.venv/bin/pre-commit run --all-files
+```
+
+## Sources And License
+
+This POC uses the independent [OpenJev model](https://huggingface.co/openjev/openjev) and its
+[MLX 4-bit release](https://huggingface.co/openjev/openjev-MLX-4bit), not the hosted Jev service.
+Model weights are published under **CC BY-NC 4.0** for non-commercial use, not unrestricted
+commercial open source. Official helpers are Apache-2.0 licensed. Downloaded license and NOTICE
+files are preserved in `models/openjev-mlx-4bit` and `vendor/openjev`.
+
+Pinned helper revision: `1c341f65bfe5d50fdb935c71e9739c9e0938d6c4`.
+Pinned model revision: `c59bf1eed7d8de0eb88105a0d5517c9b4a858e16`.
+Official client references: [Python SDK](https://docs.typesafe.ai/sdk/python) and
+[Choice](https://docs.typesafe.ai/primitives/choice).
